@@ -1,0 +1,315 @@
+<?php
+    /*
+    * SignPass.class
+    * @author sthorne
+    * 
+    * class to sign Apple Passbook Packages
+    *
+    */
+    
+    /**
+     * SignPass class
+     *
+     * @package default
+     * @author Sean Thorne
+     **/
+    class SignPass {
+        
+        /**
+         * constants
+         *
+         **/
+         
+         
+        /**
+         * vars
+         *
+         **/
+         
+         public $pass_url;
+         
+         public $cert_url;
+         
+         public $cert_password;
+         
+         public $wwdr_intermediate_cert_path;
+         
+         public $output_url;
+         
+         public $compress_into_zip_file;
+         
+         public $signature_file;
+         
+         public $manifest_file;
+         
+        
+        /**
+         * __construct function
+         * 
+         *
+         * @return void
+         * @author Sean Thorne
+         **/
+        public function __construct($pass_url, $cert_url, $cert_password, $wwdr_intermediate_cert_path, $output_url, $compress_into_zip_file = TRUE) {
+            
+            # create a temporary directory to store the contents
+            $this->create_temp_dir();
+            
+            $this->pass_url = $pass_url;
+            
+            $this->cert_url = $cert_url;
+            
+            $this->cert_password = $cert_password;
+            
+            $this->wwdr_intermediate_cert_path = $wwdr_intermediate_cert_path;
+            
+            $this->output_url = $output_url;
+            
+            $this->compress_into_zip_file = $compress_into_zip_file;
+            
+            $this->signature_file = $this->temp_dir . DIRECTORY_SEPARATOR . "signature";
+            
+            $this->manifest_file = $this->temp_dir . DIRECTORY_SEPARATOR . "manifest.json";
+        }
+        
+        /**
+         * sign_pass function
+         *
+         * @return bool
+         * @author Sean Thorne
+         **/
+        public function sign_pass($force_clean_raw_pass = FALSE) {
+            
+            # validate the requested contents are not a signed and expanded pass archive.
+            $this->validate_dir_unsigned_pass($force_clean_raw_pass);
+            
+            # copy the pass contents to the temp folder
+            $this->cp_r();
+            
+            # build the json manifest
+            $this->build_manifest();
+            
+            # sign the manifest
+            $this->sign_manifest();
+            
+            # convert the signature file format into the version apple requires
+            $this->deconstruct_signature();
+            
+            # package it all up
+            $this->zip_pass();
+            
+            # clean up the temp dir
+            $this->delete_temp_dir();
+        }
+        
+        /**
+         * validate_dir_unsigned_pass function
+         * 
+         *
+         * @return void
+         * @author Sean Thorne
+         **/
+        private function validate_dir_unsigned_pass($force = FALSE) {
+            
+            $this->signed_file_check($force, $this->manifest_file);
+            
+            $this->signed_file_check($force, $this->signature_file);
+            
+        }
+        
+        /**
+         * signed_file_check function
+         * 
+         *
+         * @return void
+         * @author Sean Thorne
+         **/
+        private function signed_file_check($force, $file_name) {
+            
+            if(file_exists($file_name))
+            {
+                if($force)
+                {
+                    unlink($file_name);
+                }
+                else
+                {
+                    Throw new Exception("Signature File [" . $file_name . "] already exists!");
+                }
+            }
+        }
+        
+        /**
+         * create_temp_dir function
+         * 
+         *
+         * @return void
+         * @author Sean Thorne
+         **/
+        private function create_temp_dir() {
+            
+            $this->temp_dir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . "pass_tmp";
+            
+            if(is_dir($this->temp_dir) === FALSE)
+            {
+                mkdir($this->temp_dir);
+            }
+            
+        }
+        
+        /**
+         * cp_r function
+         * 
+         *
+         * @return void
+         * @author Sean Thorne
+         **/
+        private function cp_r() {
+            
+            foreach($iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($this->pass_url, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file_or_dir)
+            {
+                if($file_or_dir->isDir())
+                {
+                    mkdir($this->temp_dir . DIRECTORY_SEPARATOR . $iterator->getSubPathName());
+                }
+                else if($file_or_dir->getBasename() == ".DS_Store")
+                {
+                    continue;
+                }
+                else
+                {
+                    copy($file_or_dir, $this->temp_dir . DIRECTORY_SEPARATOR . $iterator->getSubPathName());
+                }
+            }
+        }
+        
+        /**
+         * build_manifest function
+         * 
+         *
+         * @return void
+         * @author Sean Thorne
+         **/
+        private function build_manifest() {
+            
+            $manifest = [];
+            
+            foreach($iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($this->temp_dir, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file)
+            {
+                if($file->isFile() && $file->getBasename() != ".DS_Store")
+                {
+                    $manifest[$file->getBasename()] = sha1_file($file);
+                }
+            }
+            
+            file_put_contents($this->manifest_file, json_encode($manifest));
+            
+        }
+        
+        /**
+         * sign_manifest function
+         * 
+         *
+         * @return void
+         * @author Sean Thorne
+         **/
+        private function sign_manifest() {
+            
+            openssl_pkcs12_read(file_get_contents($this->cert_url), $p12_cert, $this->cert_password);
+            
+            if(isset($this->wwdr_intermediate_cert_path) && file_exists($this->wwdr_intermediate_cert_path))
+            {
+                $wwdr_cert = openssl_x509_read(file_get_contents($this->wwdr_intermediate_cert_path));
+            }
+            else
+            {
+                $wwdr_cert = NULL;
+            }
+            
+            openssl_pkcs7_sign($this->manifest_file, $this->signature_file, $p12_cert['cert'], $p12_cert['pkey'], NULL, PKCS7_BINARY | PKCS7_DETACHED);
+            
+        }
+        
+        /**
+         * deconstruct_signature function
+         * 
+         *
+         * @return void
+         * @author Sean Thorne
+         **/
+        private function deconstruct_signature() {
+            
+            $sig_contents = file_get_contents($this->signature_file);
+            
+            # locate the boundary
+            preg_match("/(boundary=\"(----[A-Z0-9]+)\")/", $sig_contents, $matches);
+            
+            $sig_chunk = explode($matches[2], $sig_contents)[3];
+            
+            $sig_chunk = str_replace("--", "", $sig_chunk);
+            
+            $sig_chunk = preg_replace("/([A-Za-z\-]+: .+)/", "", $sig_chunk);
+            
+            $sig_chunk = str_replace("\r", "", $sig_chunk);
+            
+            $sig_chunk = str_replace("\n", "", $sig_chunk);
+            
+            $sig_chunk = trim($sig_chunk);
+            
+            file_put_contents($this->signature_file, base64_decode($sig_chunk));
+            
+        }
+        
+        /**
+         * zip_pass function
+         * 
+         *
+         * @return void
+         * @author Sean Thorne
+         **/
+        private function zip_pass() {
+            
+            $zip = new ZipArchive();
+            
+            $zip->open($this->output_url, ZIPARCHIVE::CREATE | ZIPARCHIVE::OVERWRITE);
+            
+            foreach($iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($this->temp_dir, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file)
+            {
+                if($file->isFile() && $file->getBasename() != ".DS_Store")
+                {
+                    $zip->addFile($file, $file->getBasename());
+                }
+            }
+            
+            $zip->close();
+            
+        }
+        
+        /**
+         * delete_temp_dir function
+         * 
+         *
+         * @return void
+         * @author Sean Thorne
+         **/
+        private function delete_temp_dir() {
+            
+            foreach($iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($this->temp_dir, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file_or_dir)
+            {
+                if($file_or_dir->isDir())
+                {
+                    rmdir($file_or_dir);
+                }
+                else
+                {
+                    unlink($file_or_dir);
+                }
+            }
+            
+            rmdir($this->temp_dir);
+            
+        }
+    } // END class 
+    
+    
+?>
